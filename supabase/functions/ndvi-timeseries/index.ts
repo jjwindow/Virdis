@@ -53,6 +53,10 @@ function base64url(data: Uint8Array): string {
     .replace(/=+$/, "");
 }
 
+function normalizePrivateKey(privateKeyPem: string): string {
+  return privateKeyPem.replace(/\\n/g, "\n");
+}
+
 async function createJwt(email: string, privateKeyPem: string, scopes: string[]): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
   const header = { alg: "RS256", typ: "JWT" };
@@ -74,8 +78,15 @@ async function getGeeAccessToken(): Promise<string> {
   }
   const raw = Deno.env.get("GEE_SERVICE_ACCOUNT_JSON");
   if (!raw) throw new Error("GEE_SERVICE_ACCOUNT_JSON secret not configured");
-  const sa = JSON.parse(raw);
-  const jwt = await createJwt(sa.client_email, sa.private_key, ["https://www.googleapis.com/auth/earthengine"]);
+  let sa: { client_email: string; private_key: string };
+  try {
+    sa = JSON.parse(raw);
+  } catch (error) {
+    console.error("GEE service account JSON parse error:", error);
+    throw new Error(`GEE_SERVICE_ACCOUNT_JSON invalid: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const normalizedPrivateKey = normalizePrivateKey(sa.private_key);
+  const jwt = await createJwt(sa.client_email, normalizedPrivateKey, ["https://www.googleapis.com/auth/earthengine"]);
   const resp = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },

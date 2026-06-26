@@ -57,6 +57,10 @@ function base64url(data: Uint8Array): string {
     .replace(/=+$/, "");
 }
 
+function normalizePrivateKey(privateKeyPem: string): string {
+  return privateKeyPem.replace(/\\n/g, "\n");
+}
+
 async function createJwt(email: string, privateKeyPem: string, scopes: string[]): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
   const header = { alg: "RS256", typ: "JWT" };
@@ -78,8 +82,15 @@ async function getGeeAccessToken(): Promise<string> {
   }
   const raw = Deno.env.get("GEE_SERVICE_ACCOUNT_JSON");
   if (!raw) throw new Error("GEE_SERVICE_ACCOUNT_JSON secret not configured");
-  const sa = JSON.parse(raw);
-  const jwt = await createJwt(sa.client_email, sa.private_key, ["https://www.googleapis.com/auth/earthengine"]);
+  let sa: { client_email: string; private_key: string };
+  try {
+    sa = JSON.parse(raw);
+  } catch (error) {
+    console.error("GEE service account JSON parse error:", error);
+    throw new Error(`GEE_SERVICE_ACCOUNT_JSON invalid: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const normalizedPrivateKey = normalizePrivateKey(sa.private_key);
+  const jwt = await createJwt(sa.client_email, normalizedPrivateKey, ["https://www.googleapis.com/auth/earthengine"]);
   const resp = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -808,32 +819,53 @@ serve(async (req) => {
     // Run all requested analyses in parallel instead of sequentially.
     // Sequential execution stacked GEE latency per analysis — this was the main slowdown.
     const tasks: Promise<void>[] = [];
+    const errors: Record<string, string> = {};
     if (requested.includes("land_use")) {
       tasks.push(
         computeLandUse(token, projectId, coords)
           .then((v) => { results.land_use = v; })
-          .catch((e) => { console.error("Land use error:", e); results.land_use = null; })
+          .catch((e) => {
+            const message = e instanceof Error ? e.message : String(e);
+            console.error("Land use error:", message);
+            errors.land_use = message;
+            results.land_use = null;
+          })
       );
     }
     if (requested.includes("vegetation")) {
       tasks.push(
         computeVegetationIndices(token, projectId, coords)
           .then((v) => { results.vegetation = v; })
-          .catch((e) => { console.error("Vegetation error:", e); results.vegetation = null; })
+          .catch((e) => {
+            const message = e instanceof Error ? e.message : String(e);
+            console.error("Vegetation error:", message);
+            errors.vegetation = message;
+            results.vegetation = null;
+          })
       );
     }
     if (requested.includes("suitability")) {
       tasks.push(
         computeLandSuitability(token, projectId, coords)
           .then((v) => { results.suitability = v; })
-          .catch((e) => { console.error("Suitability error:", e); results.suitability = null; })
+          .catch((e) => {
+            const message = e instanceof Error ? e.message : String(e);
+            console.error("Suitability error:", message);
+            errors.suitability = message;
+            results.suitability = null;
+          })
       );
     }
     if (requested.includes("growth_stage")) {
       tasks.push(
         computeGrowthStage(token, projectId, coords)
           .then((v) => { results.growth_stage = v; })
-          .catch((e) => { console.error("Growth stage error:", e); results.growth_stage = null; })
+          .catch((e) => {
+            const message = e instanceof Error ? e.message : String(e);
+            console.error("Growth stage error:", message);
+            errors.growth_stage = message;
+            results.growth_stage = null;
+          })
       );
     }
     await Promise.all(tasks);
@@ -843,7 +875,7 @@ serve(async (req) => {
       setCachedAnalytics(cacheKey, results);
     }
 
-    return new Response(JSON.stringify(results), {
+    return new Response(JSON.stringify({ ...results, errors: Object.keys(errors).length ? errors : undefined }), {
       headers: { ...corsHeaders, "Content-Type": "application/json", "Cache-Control": "public, max-age=300" },
     });
   } catch (e) {
